@@ -111,15 +111,8 @@ app.get('/api/messages/:user1/:user2', (req, res) => {
 });
 
 app.delete('/api/messages/:id', (req, res) => {
-  const result = db.deleteMessage(req.params.id);
+  const result = db.deleteMessage(req.params.id, req.query.by);
   if (result.error) return res.status(400).json(result);
-  // Notify the other user
-  const msg = result.message;
-  const otherUser = msg.from === req.query.by ? msg.to : msg.from;
-  const toSocket = onlineUsers[otherUser];
-  if (toSocket) {
-    io.to(toSocket).emit('message-deleted', { id: msg.id });
-  }
   res.json(result);
 });
 

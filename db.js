@@ -155,7 +155,8 @@ function saveMessage(from, to, content, type = 'text') {
   const msg = {
     id: Date.now().toString(36) + Math.random().toString(36).substr(2, 9),
     from, to, content, type,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    deletedBy: []
   };
   db.messages.push(msg);
   saveDB(db);
@@ -172,12 +173,14 @@ function getMessages(user1, user2, limit = 50) {
     .slice(-limit);
 }
 
-function deleteMessage(id) {
+function deleteMessage(id, byUser) {
   const db = loadDB();
-  const idx = db.messages.findIndex(m => m.id === id);
-  if (idx === -1) return { error: '消息不存在' };
-  const msg = db.messages[idx];
-  db.messages.splice(idx, 1);
+  const msg = db.messages.find(m => m.id === id);
+  if (!msg) return { error: '消息不存在' };
+  if (!msg.deletedBy) msg.deletedBy = [];
+  if (!msg.deletedBy.includes(byUser)) {
+    msg.deletedBy.push(byUser);
+  }
   saveDB(db);
   return { success: true, message: msg };
 }

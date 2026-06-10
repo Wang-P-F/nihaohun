@@ -222,15 +222,6 @@ function enterApp() {
     loadFriends();
   });
 
-  socket.on('message-deleted', (data) => {
-    // Remove from all caches
-    for (const key in messagesCache) {
-      messagesCache[key] = messagesCache[key].filter(m => m.id !== data.id);
-    }
-    if (currentChat) renderMessages();
-    renderContacts();
-  });
-
   socket.on('message-recalled', (msg) => {
     const key = [msg.from, msg.to].sort().join(':');
     if (messagesCache[key]) {
@@ -419,7 +410,7 @@ function renderContacts() {
     if (activeTab === 'chats') {
       items = items.map(f => {
         const key = [currentUser.username, f.username].sort().join(':');
-        const msgs = messagesCache[key] || [];
+        const msgs = (messagesCache[key] || []).filter(m => !(m.deletedBy && m.deletedBy.includes(currentUser.username)));
         const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
         return { ...f, lastMsg, lastTime: lastMsg ? lastMsg.createdAt : f.addedAt };
       }).sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0));
@@ -564,7 +555,7 @@ function updateChatStatus() {
 function renderMessages() {
   const container = document.getElementById('messagesContainer');
   const key = [currentUser.username, currentChat.username].sort().join(':');
-  const msgs = messagesCache[key] || [];
+  const msgs = (messagesCache[key] || []).filter(m => !(m.deletedBy && m.deletedBy.includes(currentUser.username)));
 
   container.innerHTML = msgs.map(m => createMessageHTML(m)).join('');
   container.scrollTop = container.scrollHeight;
@@ -577,9 +568,11 @@ function createMessageHTML(m) {
     ? (isSent ? '你撤回了一条消息' : '对方撤回了一条消息')
     : escapeHtml(m.content);
   const bubbleClass = m.recalled ? 'message-bubble recalled' : 'message-bubble';
+  // Menu available for all non-recalled messages (delete is personal, recall only for own)
+  const showMenu = !m.recalled;
   return `
     <div class="message-group ${isSent ? 'sent' : 'received'}" data-msg-id="${m.id}" data-msg-from="${m.from}">
-      <div class="${bubbleClass}"${!m.recalled && isSent ? ` oncontextmenu="showMsgMenu(event,'${m.id}',${canRecall})" ontouchstart="handleTouchStart(event,'${m.id}',${canRecall})" ontouchend="handleTouchEnd(event)" ontouchmove="handleTouchMove(event)"` : ''}>${bubbleText}</div>
+      <div class="${bubbleClass}"${showMenu ? ` oncontextmenu="showMsgMenu(event,'${m.id}',${canRecall})" ontouchstart="handleTouchStart(event,'${m.id}',${canRecall})" ontouchend="handleTouchEnd(event)" ontouchmove="handleTouchMove(event)"` : ''}>${bubbleText}</div>
     </div>
     <div class="message-time">${formatTime(m.createdAt)}${m.recalled ? ' · 已撤回' : ''}</div>
   `;
@@ -684,11 +677,17 @@ async function deleteMessageById(msgId) {
       showToast(data.error);
       return;
     }
-    // Update local cache
+    // Update local cache: mark as deleted for current user
     const msg = data.message;
     const key = [msg.from, msg.to].sort().join(':');
     if (messagesCache[key]) {
-      messagesCache[key] = messagesCache[key].filter(m => m.id !== msg.id);
+      const cached = messagesCache[key].find(m => m.id === msg.id);
+      if (cached) {
+        if (!cached.deletedBy) cached.deletedBy = [];
+        if (!cached.deletedBy.includes(currentUser.username)) {
+          cached.deletedBy.push(currentUser.username);
+        }
+      }
     }
     if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
       renderMessages();
