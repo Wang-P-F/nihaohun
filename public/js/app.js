@@ -13,7 +13,44 @@ let peerConnection = null;
 let localStream = null;
 let callTimer = null;
 let callSeconds = 0;
-const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+let remoteAudio = null;
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' }
+  ]
+};
+
+// Play remote audio stream with mobile compatibility
+function playRemoteAudio(stream) {
+  if (remoteAudio) {
+    remoteAudio.srcObject = null;
+    remoteAudio.remove();
+  }
+  remoteAudio = document.createElement('audio');
+  remoteAudio.setAttribute('playsinline', '');
+  remoteAudio.setAttribute('autoplay', '');
+  remoteAudio.srcObject = stream;
+  document.body.appendChild(remoteAudio);
+  const playPromise = remoteAudio.play();
+  if (playPromise !== undefined) {
+    playPromise.catch(() => {
+      // Autoplay blocked - show tap-to-enable hint
+      const hint = document.createElement('div');
+      hint.id = 'audioHint';
+      hint.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--accent);color:white;padding:12px 24px;border-radius:20px;font-size:14px;font-weight:600;z-index:300;cursor:pointer;font-family:var(--font);box-shadow:0 4px 16px rgba(0,0,0,0.2);';
+      hint.textContent = '点击此处开启声音';
+      hint.onclick = () => {
+        remoteAudio.play();
+        hint.remove();
+      };
+      document.body.appendChild(hint);
+    });
+  }
+}
 
 // Group voice room state
 let currentRoomId = null;
@@ -709,9 +746,7 @@ async function startVoiceCall() {
   };
 
   peerConnection.ontrack = (e) => {
-    const audio = new Audio();
-    audio.srcObject = e.streams[0];
-    audio.play();
+    playRemoteAudio(e.streams[0]);
     document.getElementById('callStatus').textContent = '通话中';
     startCallTimer();
   };
@@ -760,9 +795,7 @@ async function acceptIncomingCall(data) {
   };
 
   peerConnection.ontrack = (e) => {
-    const audio = new Audio();
-    audio.srcObject = e.streams[0];
-    audio.play();
+    playRemoteAudio(e.streams[0]);
     document.getElementById('callStatus').textContent = '通话中';
     startCallTimer();
   };
@@ -787,6 +820,13 @@ function endCall() {
     localStream.getTracks().forEach(t => t.stop());
     localStream = null;
   }
+  if (remoteAudio) {
+    remoteAudio.srcObject = null;
+    remoteAudio.remove();
+    remoteAudio = null;
+  }
+  const hint = document.getElementById('audioHint');
+  if (hint) hint.remove();
   if (callTimer) {
     clearInterval(callTimer);
     callTimer = null;
@@ -907,9 +947,7 @@ function createGroupPeerConnection(targetSocketId) {
     }
   };
   pc.ontrack = (e) => {
-    const audio = new Audio();
-    audio.srcObject = e.streams[0];
-    audio.play();
+    playRemoteAudio(e.streams[0]);
     document.getElementById('groupCallStatus').textContent = '通话中';
     if (!groupCallTimer) startGroupCallTimer();
   };
@@ -976,6 +1014,13 @@ function leaveVoiceRoom() {
     groupLocalStream.getTracks().forEach(t => t.stop());
     groupLocalStream = null;
   }
+  if (remoteAudio) {
+    remoteAudio.srcObject = null;
+    remoteAudio.remove();
+    remoteAudio = null;
+  }
+  const hint = document.getElementById('audioHint');
+  if (hint) hint.remove();
   if (groupCallTimer) {
     clearInterval(groupCallTimer);
     groupCallTimer = null;
