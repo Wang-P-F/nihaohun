@@ -69,6 +69,9 @@
       <div class="sidebar-header">
         <h2>nihaohun</h2>
         <div class="sidebar-actions">
+          <button class="icon-btn" onclick="openVoiceRooms()" title="语音房间">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
           <button class="icon-btn" onclick="openSearchPanel()" title="添加好友">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
           </button>
@@ -93,21 +96,24 @@
         <button class="sidebar-tab" onclick="switchSidebarTab('contacts')">
           通讯录
         </button>
+        <button class="sidebar-tab" onclick="switchSidebarTab('voice')">
+          语音房
+        </button>
         <button class="sidebar-tab" onclick="switchSidebarTab('requests')">
-          好友请求
+          请求
           <span class="badge" id="requestBadge" style="display:none">0</span>
         </button>
       </div>
 
       <div class="contact-list" id="contactList"></div>
 
-      <div class="profile-section" id="profileSection">
+      <div class="profile-section" id="profileSection" onclick="openProfilePanel()">
         <div class="avatar sm" id="profileAvatar"></div>
         <div class="profile-name">
           <h4 id="profileName"></h4>
           <p id="profileId"></p>
         </div>
-        <button class="logout-btn" onclick="handleLogout()" title="退出登录">
+        <button class="logout-btn" onclick="event.stopPropagation(); handleLogout()" title="退出登录">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
         </button>
       </div>
@@ -187,6 +193,56 @@
     <div class="call-status" id="callStatus">正在呼叫...</div>
     <div class="call-timer" id="callTimer" style="display:none">00:00</div>
     <div class="call-actions" id="callActions"></div>
+  </div>
+
+  <!-- ========== Profile Edit Panel ========== -->
+  <div class="panel-overlay" id="profilePanel">
+    <div class="panel">
+      <button class="panel-close" onclick="closePanel('profilePanel')">&times;</button>
+      <h3>编辑资料</h3>
+      <div style="text-align:center; margin-bottom:20px;">
+        <div class="avatar lg" id="editProfileAvatar" style="margin:0 auto;"></div>
+      </div>
+      <div class="form-group">
+        <label>昵称</label>
+        <input type="text" id="editNickname" placeholder="输入新昵称">
+      </div>
+      <div class="form-group">
+        <label>账号（不可修改）</label>
+        <input type="text" id="editUsername" disabled style="opacity:0.5; cursor:not-allowed;">
+      </div>
+      <button class="btn-primary" onclick="saveProfile()">保存修改</button>
+    </div>
+  </div>
+
+  <!-- ========== Voice Room Panel ========== -->
+  <div class="panel-overlay" id="voiceRoomPanel">
+    <div class="panel" style="width:560px;">
+      <button class="panel-close" onclick="closePanel('voiceRoomPanel')">&times;</button>
+      <h3>语音房间</h3>
+      <div style="display:flex; gap:10px; margin-bottom:20px;">
+        <input type="text" id="newRoomName" placeholder="房间名称..." style="flex:1; padding:10px 14px; border:1px solid var(--bg-tertiary); border-radius:var(--radius-sm); font-size:14px; font-family:var(--font); outline:none;">
+        <button class="btn-add" onclick="createVoiceRoom()" style="white-space:nowrap;">创建房间</button>
+      </div>
+      <div id="voiceRoomList">
+        <p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">暂无语音房间</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Group Voice Room Overlay ========== -->
+  <div class="call-overlay" id="groupCallOverlay" style="display:none;">
+    <div style="text-align:center;">
+      <div class="call-name" id="groupRoomName" style="margin-bottom:4px;"></div>
+      <div class="call-status" id="groupCallStatus">连接中...</div>
+      <div class="call-timer" id="groupCallTimer" style="display:none; margin-top:8px;">00:00</div>
+    </div>
+    <div class="group-participants" id="groupParticipants"></div>
+    <div class="call-actions">
+      <button class="call-action-btn end-call" onclick="leaveVoiceRoom()">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+      </button>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>

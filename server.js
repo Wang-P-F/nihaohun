@@ -113,6 +113,9 @@ app.get('/api/messages/:user1/:user2', (req, res) => {
 // ========== Online users tracking ==========
 const onlineUsers = {};
 
+// ========== Voice Rooms ==========
+const voiceRooms = {}; // { roomId: { name, creator, participants: [{ username, socketId }] } }
+
 // ========== Socket.IO ==========
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -121,6 +124,7 @@ io.on('connection', (socket) => {
     onlineUsers[username] = socket.id;
     socket.username = username;
     io.emit('online-users', Object.keys(onlineUsers));
+    io.emit('voice-rooms-update', getPublicRooms());
   });
 
   socket.on('send-message', (data) => {
@@ -132,7 +136,7 @@ io.on('connection', (socket) => {
     socket.emit('message-sent', msg);
   });
 
-  // Voice call signaling
+  // Voice call signaling (1-on-1)
   socket.on('call-user', (data) => {
     const toSocket = onlineUsers[data.to];
     if (toSocket) {
@@ -179,14 +183,125 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ========== Group Voice Room Signaling ==========
+  socket.on('create-voice-room', (data) => {
+    const roomId = 'room_' + Date.now().toString(36);
+    voiceRooms[roomId] = {
+      name: data.name || '语音房间',
+      creator: data.username,
+      participants: [{ username: data.username, socketId: socket.id }]
+    };
+    socket.join(roomId);
+    socket.emit('voice-room-created', { roomId, room: voiceRooms[roomId] });
+    io.emit('voice-rooms-update', getPublicRooms());
+  });
+
+  socket.on('join-voice-room', (data) => {
+    const room = voiceRooms[data.roomId];
+    if (!room) return socket.emit('voice-room-error', { error: '房间不存在' });
+
+    // Notify existing participants to create offers for the new joiner
+    const existingParticipants = room.participants.filter(p => p.username !== data.username);
+    room.participants.push({ username: data.username, socketId: socket.id });
+    socket.join(data.roomId);
+
+    // Send current participant list to joiner
+    socket.emit('voice-room-joined', {
+      roomId: data.roomId,
+      room: { ...room, participants: room.participants.map(p => ({ username: p.username })) }
+    });
+
+    // Notify existing participants about new joiner
+    existingParticipants.forEach(p => {
+      io.to(p.socketId).emit('voice-room-peer-joined', {
+        username: data.username,
+        socketId: socket.id,
+        roomId: data.roomId
+      });
+    });
+
+    io.emit('voice-rooms-update', getPublicRooms());
+  });
+
+  // Group WebRTC signaling
+  socket.on('group-offer', (data) => {
+    io.to(data.to).emit('group-offer', {
+      from: socket.id,
+      fromUser: data.fromUser,
+      offer: data.offer,
+      roomId: data.roomId
+    });
+  });
+
+  socket.on('group-answer', (data) => {
+    io.to(data.to).emit('group-answer', {
+      from: socket.id,
+      fromUser: data.fromUser,
+      answer: data.answer,
+      roomId: data.roomId
+    });
+  });
+
+  socket.on('group-ice-candidate', (data) => {
+    io.to(data.to).emit('group-ice-candidate', {
+      from: socket.id,
+      candidate: data.candidate
+    });
+  });
+
+  socket.on('leave-voice-room', (data) => {
+    leaveVoiceRoom(socket);
+  });
+
   socket.on('disconnect', () => {
     if (socket.username) {
       delete onlineUsers[socket.username];
       io.emit('online-users', Object.keys(onlineUsers));
     }
+    leaveVoiceRoom(socket);
     console.log('User disconnected:', socket.id);
   });
 });
+
+function leaveVoiceRoom(socket) {
+  for (const roomId in voiceRooms) {
+    const room = voiceRooms[roomId];
+    const idx = room.participants.findIndex(p => p.socketId === socket.id);
+    if (idx !== -1) {
+      const leaving = room.participants.splice(idx, 1)[0];
+      // Notify others
+      room.participants.forEach(p => {
+        io.to(p.socketId).emit('voice-room-peer-left', {
+          username: leaving.username,
+          roomId
+        });
+      });
+      // Remove room if empty
+      if (room.participants.length === 0) {
+        delete voiceRooms[roomId];
+      }
+      socket.leave(roomId);
+      io.emit('voice-rooms-update', getPublicRooms());
+      break;
+    }
+  }
+}
+
+function getPublicRooms() {
+  const result = [];
+  for (const roomId in voiceRooms) {
+    const room = voiceRooms[roomId];
+    result.push({
+      roomId,
+      name: room.name,
+      creator: room.creator,
+      creatorUser: db.getUser(room.creator),
+      participantCount: room.participants.length,
+      participants: room.participants.map(p => ({ username: p.username, user: db.getUser(p.username) }))
+    });
+  }
+  return result;
+}
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {

@@ -15,6 +15,14 @@ let callTimer = null;
 let callSeconds = 0;
 const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
+// Group voice room state
+let currentRoomId = null;
+let groupPeerConnections = {}; // { socketId: RTCPeerConnection }
+let groupLocalStream = null;
+let groupCallTimer = null;
+let groupCallSeconds = 0;
+let voiceRoomsList = [];
+
 // Avatar colors
 const AVATAR_COLORS = [
   '#0071e3', '#34c759', '#ff9500', '#ff3b30', '#af52de',
@@ -116,6 +124,7 @@ async function handleRegister(e) {
 }
 
 function handleLogout() {
+  if (currentRoomId) leaveVoiceRoom();
   if (socket) socket.disconnect();
   currentUser = null;
   currentChat = null;
@@ -196,8 +205,113 @@ function enterApp() {
     endCall();
   });
 
+  // Group voice room signaling
+  socket.on('voice-rooms-update', (rooms) => {
+    voiceRoomsList = rooms;
+    if (activeTab === 'voice') renderContacts();
+  });
+  socket.on('voice-room-created', (data) => {
+    currentRoomId = data.roomId;
+    showToast('语音房间已创建');
+    closePanel('voiceRoomPanel');
+    showGroupCallOverlay(data.room);
+  });
+  socket.on('voice-room-joined', (data) => {
+    currentRoomId = data.roomId;
+    closePanel('voiceRoomPanel');
+    showGroupCallOverlay(data.room);
+  });
+  socket.on('voice-room-peer-joined', async (data) => {
+    // Create offer for the new peer
+    const pc = createGroupPeerConnection(data.socketId);
+    groupPeerConnections[data.socketId] = pc;
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit('group-offer', {
+      to: data.socketId,
+      fromUser: currentUser.username,
+      offer,
+      roomId: data.roomId
+    });
+    // Update UI
+    const room = voiceRoomsList.find(r => r.roomId === data.roomId);
+    if (room) showGroupCallOverlay(room);
+  });
+  socket.on('voice-room-peer-left', (data) => {
+    const pc = groupPeerConnections[data.socketId || ''];
+    if (pc) {
+      pc.close();
+      delete groupPeerConnections[data.socketId || ''];
+    }
+    const room = voiceRoomsList.find(r => r.roomId === data.roomId);
+    if (room) {
+      showGroupCallOverlay(room);
+    }
+    if (data.username) showToast(`${data.username} 离开了房间`);
+  });
+  socket.on('voice-room-error', (data) => {
+    showToast(data.error);
+  });
+
+  // Group WebRTC
+  socket.on('group-offer', async (data) => {
+    const pc = createGroupPeerConnection(data.from);
+    groupPeerConnections[data.from] = pc;
+    await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('group-answer', {
+      to: data.from,
+      fromUser: currentUser.username,
+      answer,
+      roomId: data.roomId
+    });
+  });
+
+  socket.on('group-answer', async (data) => {
+    const pc = groupPeerConnections[data.from];
+    if (pc) {
+      await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+    }
+  });
+
+  socket.on('group-ice-candidate', async (data) => {
+    const pc = groupPeerConnections[data.from];
+    if (pc) {
+      await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+    }
+  });
+
   loadFriends();
   loadFriendRequests();
+}
+
+// ========== Profile Edit ==========
+function openProfilePanel() {
+  document.getElementById('profilePanel').classList.add('active');
+  document.getElementById('editNickname').value = currentUser.nickname;
+  document.getElementById('editUsername').value = currentUser.username;
+  setAvatar(document.getElementById('editProfileAvatar'), currentUser.nickname);
+}
+
+async function saveProfile() {
+  const newNickname = document.getElementById('editNickname').value.trim();
+  if (!newNickname) return showToast('昵称不能为空');
+
+  const res = await fetch(`/api/user/${currentUser.username}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nickname: newNickname })
+  });
+  const data = await res.json();
+  if (data.error) return showToast(data.error);
+
+  currentUser = data.user;
+  document.getElementById('profileName').textContent = currentUser.nickname;
+  setAvatar(document.getElementById('profileAvatar'), currentUser.nickname);
+  closePanel('profilePanel');
+  showToast('资料已更新');
+  loadFriends();
 }
 
 // ========== Load Data ==========
@@ -229,8 +343,8 @@ function switchSidebarTab(tab) {
   activeTab = tab;
   document.querySelectorAll('.sidebar-tab').forEach(t => t.classList.remove('active'));
   const tabs = document.querySelectorAll('.sidebar-tab');
-  const idx = tab === 'chats' ? 0 : tab === 'contacts' ? 1 : 2;
-  tabs[idx].classList.add('active');
+  const tabMap = { chats: 0, contacts: 1, voice: 2, requests: 3 };
+  tabs[tabMap[tab]].classList.add('active');
   renderContacts();
 }
 
@@ -281,6 +395,41 @@ function renderContacts() {
             <div class="contact-preview">${preview || '@' + f.username}</div>
           </div>
           ${lastMsg ? `<span class="contact-time">${formatTime(lastMsg.createdAt)}</span>` : ''}
+        </div>
+      `;
+    }).join('');
+  } else if (activeTab === 'voice') {
+    // Voice rooms tab
+    const rooms = voiceRoomsList;
+    if (rooms.length === 0) {
+      list.innerHTML = `
+        <div style="text-align:center; padding:40px 20px; color:var(--text-tertiary);">
+          暂无语音房间<br>
+          <small style="color:var(--accent); cursor:pointer;" onclick="openVoiceRooms()">创建一个房间</small>
+        </div>`;
+      return;
+    }
+    list.innerHTML = rooms.map(r => {
+      const isInRoom = currentRoomId === r.roomId;
+      return `
+        <div class="voice-room-item">
+          <div class="voice-room-icon">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </div>
+          <div class="voice-room-info">
+            <div class="voice-room-name">${r.name}</div>
+            <div class="voice-room-meta">${r.creatorUser ? r.creatorUser.nickname : '未知'} 创建 · ${r.participantCount} 人</div>
+            <div class="voice-room-avatars">
+              ${r.participants.slice(0, 5).map(p => `
+                <div class="avatar" style="background:${getAvatarColor(p.user ? p.user.nickname : p.username)}">${getInitials(p.user ? p.user.nickname : p.username)}</div>
+              `).join('')}
+              ${r.participantCount > 5 ? `<div class="avatar" style="background:var(--bg-tertiary); font-size:10px; color:var(--text-secondary);">+${r.participantCount - 5}</div>` : ''}
+            </div>
+          </div>
+          ${isInRoom
+            ? '<button class="btn-join-room" style="background:var(--red);" onclick="leaveVoiceRoom()">离开</button>'
+            : `<button class="btn-join-room" onclick="joinVoiceRoom('${r.roomId}')">加入</button>`
+          }
         </div>
       `;
     }).join('');
@@ -381,13 +530,11 @@ function handleMessageKey(e) {
     e.preventDefault();
     sendMessage();
   }
-  // Typing indicator
   if (currentChat && socket) {
     socket.emit('typing', { from: currentUser.username, to: currentChat.username });
   }
 }
 
-// Enable/disable send button
 document.addEventListener('DOMContentLoaded', () => {
   const input = document.getElementById('messageInput');
   const btn = document.getElementById('sendBtn');
@@ -526,7 +673,7 @@ async function rejectRequest(from) {
   }
 }
 
-// ========== Voice Call (WebRTC) ==========
+// ========== 1-on-1 Voice Call (WebRTC) ==========
 async function startVoiceCall() {
   if (!currentChat) return;
   if (!onlineUsersList.includes(currentChat.username)) {
@@ -686,9 +833,160 @@ function startCallTimer() {
   }, 1000);
 }
 
+// ========== Group Voice Room ==========
+function openVoiceRooms() {
+  document.getElementById('voiceRoomPanel').classList.add('active');
+  renderVoiceRoomList();
+}
+
+function renderVoiceRoomList() {
+  const list = document.getElementById('voiceRoomList');
+  if (voiceRoomsList.length === 0) {
+    list.innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">暂无语音房间，创建一个吧</p>';
+    return;
+  }
+  list.innerHTML = voiceRoomsList.map(r => {
+    const isInRoom = currentRoomId === r.roomId;
+    return `
+      <div class="voice-room-item">
+        <div class="voice-room-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+        </div>
+        <div class="voice-room-info">
+          <div class="voice-room-name">${r.name}</div>
+          <div class="voice-room-meta">${r.creatorUser ? r.creatorUser.nickname : ''} · ${r.participantCount} 人</div>
+        </div>
+        ${isInRoom
+          ? '<button class="btn-join-room" style="background:var(--red);" onclick="leaveVoiceRoom(); closePanel(\'voiceRoomPanel\');">离开</button>'
+          : `<button class="btn-join-room" onclick="joinVoiceRoom('${r.roomId}')">加入</button>`
+        }
+      </div>
+    `;
+  }).join('');
+}
+
+async function createVoiceRoom() {
+  const name = document.getElementById('newRoomName').value.trim() || `${currentUser.nickname}的房间`;
+  try {
+    groupLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showToast('无法访问麦克风');
+    return;
+  }
+  socket.emit('create-voice-room', { username: currentUser.username, name });
+  document.getElementById('newRoomName').value = '';
+}
+
+async function joinVoiceRoom(roomId) {
+  try {
+    groupLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showToast('无法访问麦克风');
+    return;
+  }
+  socket.emit('join-voice-room', { roomId, username: currentUser.username });
+}
+
+function createGroupPeerConnection(targetSocketId) {
+  const pc = new RTCPeerConnection(ICE_SERVERS);
+  if (groupLocalStream) {
+    groupLocalStream.getTracks().forEach(track => pc.addTrack(track, groupLocalStream));
+  }
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('group-ice-candidate', { to: targetSocketId, candidate: e.candidate });
+    }
+  };
+  pc.ontrack = (e) => {
+    const audio = new Audio();
+    audio.srcObject = e.streams[0];
+    audio.play();
+    document.getElementById('groupCallStatus').textContent = '通话中';
+    if (!groupCallTimer) startGroupCallTimer();
+  };
+  return pc;
+}
+
+function showGroupCallOverlay(room) {
+  const overlay = document.getElementById('groupCallOverlay');
+  overlay.style.display = 'flex';
+  overlay.classList.add('active');
+
+  document.getElementById('groupRoomName').textContent = room.name || '语音房间';
+  if (!groupCallTimer) {
+    document.getElementById('groupCallStatus').textContent = '等待其他人加入...';
+  }
+
+  const container = document.getElementById('groupParticipants');
+  // Show self
+  let html = `
+    <div class="group-participant speaking">
+      <div class="avatar" style="background:${getAvatarColor(currentUser.nickname)}">${getInitials(currentUser.nickname)}</div>
+      <div class="group-participant-name">${currentUser.nickname}（我）</div>
+    </div>
+  `;
+  // Show other participants
+  if (room.participants) {
+    room.participants.forEach(p => {
+      if (p.username !== currentUser.username) {
+        const nick = p.user ? p.user.nickname : p.username;
+        html += `
+          <div class="group-participant">
+            <div class="avatar" style="background:${getAvatarColor(nick)}">${getInitials(nick)}</div>
+            <div class="group-participant-name">${nick}</div>
+          </div>
+        `;
+      }
+    });
+  }
+  container.innerHTML = html;
+}
+
+function startGroupCallTimer() {
+  const timerEl = document.getElementById('groupCallTimer');
+  timerEl.style.display = 'block';
+  groupCallSeconds = 0;
+  groupCallTimer = setInterval(() => {
+    groupCallSeconds++;
+    const m = String(Math.floor(groupCallSeconds / 60)).padStart(2, '0');
+    const s = String(groupCallSeconds % 60).padStart(2, '0');
+    timerEl.textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function leaveVoiceRoom() {
+  if (!currentRoomId) return;
+
+  // Close all peer connections
+  for (const sid in groupPeerConnections) {
+    groupPeerConnections[sid].close();
+  }
+  groupPeerConnections = {};
+
+  if (groupLocalStream) {
+    groupLocalStream.getTracks().forEach(t => t.stop());
+    groupLocalStream = null;
+  }
+  if (groupCallTimer) {
+    clearInterval(groupCallTimer);
+    groupCallTimer = null;
+  }
+  groupCallSeconds = 0;
+
+  socket.emit('leave-voice-room', { roomId: currentRoomId });
+  currentRoomId = null;
+
+  document.getElementById('groupCallOverlay').style.display = 'none';
+  document.getElementById('groupCallOverlay').classList.remove('active');
+  document.getElementById('groupCallTimer').style.display = 'none';
+
+  showToast('已离开语音房间');
+  renderContacts();
+}
+
 // ========== Close panels on outside click ==========
 document.addEventListener('click', (e) => {
-  ['searchPanel', 'qrPanel'].forEach(id => {
+  ['searchPanel', 'qrPanel', 'profilePanel', 'voiceRoomPanel'].forEach(id => {
     if (e.target.id === id) closePanel(id);
   });
 });
