@@ -172,9 +172,33 @@ function getMessages(user1, user2, limit = 50) {
     .slice(-limit);
 }
 
+function deleteMessage(id) {
+  const db = loadDB();
+  const idx = db.messages.findIndex(m => m.id === id);
+  if (idx === -1) return { error: '消息不存在' };
+  const msg = db.messages[idx];
+  db.messages.splice(idx, 1);
+  saveDB(db);
+  return { success: true, message: msg };
+}
+
+function recallMessage(id) {
+  const db = loadDB();
+  const msg = db.messages.find(m => m.id === id);
+  if (!msg) return { error: '消息不存在' };
+  if (msg.recalled) return { error: '消息已被撤回' };
+  const elapsed = Date.now() - msg.createdAt;
+  if (elapsed > 120000) return { error: '超过2分钟，无法撤回' };
+  msg.recalled = true;
+  msg.originalContent = msg.content;
+  msg.content = '';
+  saveDB(db);
+  return { success: true, message: msg };
+}
+
 module.exports = {
   createUser, authenticateUser, getUser, searchUsers, updateUser,
   sendFriendRequest, acceptFriendRequest, rejectFriendRequest,
   getFriendRequests, getFriends, areFriends,
-  saveMessage, getMessages
+  saveMessage, getMessages, deleteMessage, recallMessage
 };

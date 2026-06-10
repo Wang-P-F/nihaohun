@@ -222,6 +222,27 @@ function enterApp() {
     loadFriends();
   });
 
+  socket.on('message-deleted', (data) => {
+    // Remove from all caches
+    for (const key in messagesCache) {
+      messagesCache[key] = messagesCache[key].filter(m => m.id !== data.id);
+    }
+    if (currentChat) renderMessages();
+    renderContacts();
+  });
+
+  socket.on('message-recalled', (msg) => {
+    const key = [msg.from, msg.to].sort().join(':');
+    if (messagesCache[key]) {
+      const cached = messagesCache[key].find(m => m.id === msg.id);
+      if (cached) { cached.recalled = true; cached.content = ''; }
+    }
+    if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
+      renderMessages();
+    }
+    renderContacts();
+  });
+
   socket.on('friend-typing', (data) => {
     if (currentChat && data.from === currentChat.username) {
       document.getElementById('chatStatus').textContent = '正在输入...';
@@ -551,11 +572,16 @@ function renderMessages() {
 
 function createMessageHTML(m) {
   const isSent = m.from === currentUser.username;
+  const canRecall = isSent && !m.recalled && (Date.now() - m.createdAt <= 120000);
+  const bubbleText = m.recalled
+    ? (isSent ? '你撤回了一条消息' : '对方撤回了一条消息')
+    : escapeHtml(m.content);
+  const bubbleClass = m.recalled ? 'message-bubble recalled' : 'message-bubble';
   return `
-    <div class="message-group ${isSent ? 'sent' : 'received'}">
-      <div class="message-bubble">${escapeHtml(m.content)}</div>
+    <div class="message-group ${isSent ? 'sent' : 'received'}" data-msg-id="${m.id}" data-msg-from="${m.from}">
+      <div class="${bubbleClass}"${!m.recalled && isSent ? ` oncontextmenu="showMsgMenu(event,'${m.id}',${canRecall})" ontouchstart="handleTouchStart(event,'${m.id}',${canRecall})" ontouchend="handleTouchEnd(event)" ontouchmove="handleTouchMove(event)"` : ''}>${bubbleText}</div>
     </div>
-    <div class="message-time">${formatTime(m.createdAt)}</div>
+    <div class="message-time">${formatTime(m.createdAt)}${m.recalled ? ' · 已撤回' : ''}</div>
   `;
 }
 
@@ -563,6 +589,114 @@ function appendMessage(m) {
   const container = document.getElementById('messagesContainer');
   container.insertAdjacentHTML('beforeend', createMessageHTML(m));
   container.scrollTop = container.scrollHeight;
+}
+
+// ========== Message Menu ==========
+let msgMenuTimer = null;
+let msgMenuTarget = null;
+let touchMoved = false;
+
+function handleTouchStart(e, msgId, canRecall) {
+  touchMoved = false;
+  msgMenuTimer = setTimeout(() => {
+    showMsgMenu(e, msgId, canRecall);
+  }, 600);
+}
+
+function handleTouchEnd(e) {
+  if (msgMenuTimer) {
+    clearTimeout(msgMenuTimer);
+    msgMenuTimer = null;
+  }
+}
+
+function handleTouchMove(e) {
+  touchMoved = true;
+  if (msgMenuTimer) {
+    clearTimeout(msgMenuTimer);
+    msgMenuTimer = null;
+  }
+}
+
+function showMsgMenu(e, msgId, canRecall) {
+  e.preventDefault();
+  hideMsgMenu();
+  msgMenuTarget = msgId;
+
+  const menu = document.createElement('div');
+  menu.id = 'msgMenu';
+  menu.className = 'msg-menu';
+  menu.innerHTML = `
+    ${canRecall ? '<div class="msg-menu-item" onclick="recallMessageById(msgMenuTarget)">撤回</div>' : ''}
+    <div class="msg-menu-item" onclick="deleteMessageById(msgMenuTarget)">删除</div>
+  `;
+
+  const x = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
+  const y = e.clientY || (e.touches && e.touches[0] ? e.touches[0].clientY : 0);
+  menu.style.left = Math.max(8, Math.min(x - 60, window.innerWidth - 140)) + 'px';
+  menu.style.top = Math.max(8, y - (canRecall ? 80 : 40)) + 'px';
+
+  document.body.appendChild(menu);
+
+  // Close on click elsewhere
+  setTimeout(() => {
+    document.addEventListener('click', hideMsgMenu, { once: true });
+  }, 10);
+}
+
+function hideMsgMenu() {
+  const menu = document.getElementById('msgMenu');
+  if (menu) menu.remove();
+  msgMenuTarget = null;
+}
+
+async function recallMessageById(msgId) {
+  hideMsgMenu();
+  try {
+    const res = await fetch(`/api/messages/${msgId}/recall?by=${currentUser.username}`, { method: 'POST' });
+    const data = await res.json();
+    if (data.error) {
+      showToast(data.error);
+      return;
+    }
+    // Update local cache
+    const msg = data.message;
+    const key = [msg.from, msg.to].sort().join(':');
+    if (messagesCache[key]) {
+      const cached = messagesCache[key].find(m => m.id === msg.id);
+      if (cached) { cached.recalled = true; cached.content = ''; }
+    }
+    if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
+      renderMessages();
+    }
+    showToast('已撤回');
+  } catch (err) {
+    showToast('撤回失败');
+  }
+}
+
+async function deleteMessageById(msgId) {
+  hideMsgMenu();
+  try {
+    const res = await fetch(`/api/messages/${msgId}?by=${currentUser.username}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.error) {
+      showToast(data.error);
+      return;
+    }
+    // Update local cache
+    const msg = data.message;
+    const key = [msg.from, msg.to].sort().join(':');
+    if (messagesCache[key]) {
+      messagesCache[key] = messagesCache[key].filter(m => m.id !== msg.id);
+    }
+    if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
+      renderMessages();
+    }
+    showToast('已删除');
+  } catch (err) {
+    showToast('删除失败');
+  }
 }
 
 function escapeHtml(text) {

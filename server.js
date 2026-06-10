@@ -110,6 +110,32 @@ app.get('/api/messages/:user1/:user2', (req, res) => {
   res.json(db.getMessages(req.params.user1, req.params.user2));
 });
 
+app.delete('/api/messages/:id', (req, res) => {
+  const result = db.deleteMessage(req.params.id);
+  if (result.error) return res.status(400).json(result);
+  // Notify the other user
+  const msg = result.message;
+  const otherUser = msg.from === req.query.by ? msg.to : msg.from;
+  const toSocket = onlineUsers[otherUser];
+  if (toSocket) {
+    io.to(toSocket).emit('message-deleted', { id: msg.id });
+  }
+  res.json(result);
+});
+
+app.post('/api/messages/:id/recall', (req, res) => {
+  const result = db.recallMessage(req.params.id);
+  if (result.error) return res.status(400).json(result);
+  // Notify the other user
+  const msg = result.message;
+  const otherUser = msg.from === req.query.by ? msg.to : msg.from;
+  const toSocket = onlineUsers[otherUser];
+  if (toSocket) {
+    io.to(toSocket).emit('message-recalled', msg);
+  }
+  res.json(result);
+});
+
 // ========== Online users tracking ==========
 const onlineUsers = {};
 
