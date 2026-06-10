@@ -54,7 +54,7 @@ app.get('/api/qrcode/:username', async (req, res) => {
   const user = db.getUser(req.params.username);
   if (!user) return res.status(404).json({ error: '用户不存在' });
   try {
-    const qrData = JSON.stringify({ type: 'nihaohun-add', username: user.username });
+    const qrData = JSON.stringify({ type: 'hellohnu-add', username: user.username });
     const qrUrl = await QRCode.toDataURL(qrData, {
       width: 256,
       margin: 2,
@@ -305,5 +305,5 @@ function getPublicRooms() {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`nihaohun server running at http://localhost:${PORT}`);
+  console.log(`Hello! HNU server running at http://localhost:${PORT}`);
 });
