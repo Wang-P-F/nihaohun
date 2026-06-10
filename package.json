@@ -1,0 +1,17 @@
+{
+  "name": "nihaohun",
+  "version": "1.0.0",
+  "description": "A modern chat application with friend management, QR codes, and voice calls",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.18.2",
+    "qrcode": "^1.5.3",
+    "socket.io": "^4.7.4",
+    "uuid": "^9.0.0"
+  }
+}
