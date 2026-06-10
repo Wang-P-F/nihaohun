@@ -959,27 +959,107 @@ body {
 
 .logout-btn:hover { color: var(--red); }
 
+/* ========== Mobile Back Button ========== */
+.mobile-back-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 4px 8px 4px 0;
+  flex-shrink: 0;
+}
+
 /* ========== Responsive ========== */
 @media (max-width: 768px) {
+  .app-page {
+    position: relative;
+  }
   .sidebar {
     width: 100%;
     min-width: auto;
-    display: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 10;
+    transition: transform 0.3s ease;
   }
-  .sidebar.mobile-active {
-    display: flex;
-    position: fixed;
+  .sidebar.hidden-mobile {
+    transform: translateX(-100%);
+  }
+  .main-content {
+    width: 100%;
+    position: absolute;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
-    z-index: 50;
+    z-index: 5;
   }
-  .main-content {
-    width: 100%;
+  .mobile-back-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
   .message-group {
     max-width: 85%;
+  }
+  .auth-container {
+    padding: 32px 24px;
+    width: 95vw;
+  }
+  .auth-container h1 {
+    font-size: 24px;
+  }
+  .panel {
+    width: 95vw;
+    padding: 24px 20px;
+    max-height: 90vh;
+  }
+  .chat-header {
+    padding: 12px 16px;
+  }
+  .messages-container {
+    padding: 12px 16px;
+  }
+  .message-input-area {
+    padding: 12px 16px;
+  }
+  .message-input-area input {
+    font-size: 16px;
+  }
+  .contact-item {
+    padding: 10px;
+  }
+  .sidebar-header {
+    padding: 16px 16px 8px;
+  }
+  .sidebar-search {
+    padding: 0 12px 8px;
+  }
+  .sidebar-tabs {
+    padding: 0 12px 8px;
+  }
+  .voice-room-item {
+    padding: 12px;
+  }
+  .call-overlay .call-avatar,
+  .call-overlay .call-name {
+    font-size: 24px;
+  }
+  .call-overlay .call-avatar {
+    width: 80px;
+    height: 80px;
+    font-size: 28px;
+  }
+  #groupCallOverlay {
+    padding: 24px;
+  }
+  .group-participant .avatar {
+    width: 48px;
+    height: 48px;
+    font-size: 18px;
   }
 }
 

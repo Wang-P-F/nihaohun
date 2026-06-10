@@ -479,7 +479,16 @@ async function openChat(username) {
   renderMessages();
   renderContacts();
 
+  // Mobile: hide sidebar, show chat
+  if (window.innerWidth <= 768) {
+    document.getElementById('sidebar').classList.add('hidden-mobile');
+  }
+
   document.getElementById('messageInput').focus();
+}
+
+function closeChatMobile() {
+  document.getElementById('sidebar').classList.remove('hidden-mobile');
 }
 
 function updateChatStatus() {
