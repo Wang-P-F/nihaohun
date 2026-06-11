@@ -15,11 +15,20 @@ function loadDB() {
     fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
     return initial;
   }
-  return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+  try {
+    return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+  } catch (err) {
+    console.error('Failed to parse data.json, resetting:', err.message);
+    const initial = { users: {}, friendRequests: [], friends: [], messages: [] };
+    fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
+    return initial;
+  }
 }
 
 function saveDB(db) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  const tmp = DB_PATH + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
+  fs.renameSync(tmp, DB_PATH);
 }
 
 // User operations
@@ -193,10 +202,12 @@ function recallMessage(id) {
   const elapsed = Date.now() - msg.createdAt;
   if (elapsed > 120000) return { error: '超过2分钟，无法撤回' };
   msg.recalled = true;
-  msg.originalContent = msg.content;
   msg.content = '';
   saveDB(db);
-  return { success: true, message: msg };
+  // Return a clean copy without original content
+  const safe = { ...msg };
+  delete safe.originalContent;
+  return { success: true, message: safe };
 }
 
 module.exports = {

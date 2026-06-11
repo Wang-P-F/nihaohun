@@ -7,7 +7,9 @@ let friends = [];
 let friendRequests = [];
 let activeTab = 'chats';
 let messagesCache = {};
-let unreadCounts = {}; // { username: count }
+let unreadCounts = {};
+let toastTimer = null;
+let typingTimer = null;
 
 // Voice call state
 let peerConnection = null;
@@ -15,49 +17,57 @@ let localStream = null;
 let callTimer = null;
 let callSeconds = 0;
 let remoteAudio = null;
-let isEndingCall = false; // prevent call-end loop
-let incomingCallData = null; // store incoming call data
+let isEndingCall = false;
+let incomingCallData = null;
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' }
+    { urls: 'stun:stun2.l.google.com:19302' }
   ]
 };
 
 // Play remote audio stream with mobile compatibility
-function playRemoteAudio(stream) {
-  if (remoteAudio) {
-    remoteAudio.srcObject = null;
-    remoteAudio.remove();
+function playRemoteAudio(stream, id) {
+  // For group calls, support multiple audio elements
+  if (id) {
+    const existing = document.getElementById('audio-' + id);
+    if (existing) { existing.srcObject = stream; existing.play().catch(() => {}); return; }
+    const audio = document.createElement('audio');
+    audio.id = 'audio-' + id;
+    audio.setAttribute('playsinline', '');
+    audio.setAttribute('autoplay', '');
+    audio.srcObject = stream;
+    document.body.appendChild(audio);
+    audio.play().catch(() => {});
+    return;
   }
+  // 1-on-1 call: single audio element
+  if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio.remove(); }
+  const existingHint = document.getElementById('audioHint');
+  if (existingHint) existingHint.remove();
   remoteAudio = document.createElement('audio');
   remoteAudio.setAttribute('playsinline', '');
   remoteAudio.setAttribute('autoplay', '');
   remoteAudio.srcObject = stream;
   document.body.appendChild(remoteAudio);
-  const playPromise = remoteAudio.play();
-  if (playPromise !== undefined) {
-    playPromise.catch(() => {
-      // Autoplay blocked - show tap-to-enable hint
-      const hint = document.createElement('div');
-      hint.id = 'audioHint';
-      hint.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--accent);color:white;padding:12px 24px;border-radius:20px;font-size:14px;font-weight:600;z-index:300;cursor:pointer;font-family:var(--font);box-shadow:0 4px 16px rgba(0,0,0,0.2);';
-      hint.textContent = '点击此处开启声音';
-      hint.onclick = () => {
-        remoteAudio.play();
-        hint.remove();
-      };
-      document.body.appendChild(hint);
-    });
-  }
+  remoteAudio.play().catch(() => {
+    const hint = document.createElement('div');
+    hint.id = 'audioHint';
+    hint.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--accent);color:white;padding:12px 24px;border-radius:20px;font-size:14px;font-weight:600;z-index:300;cursor:pointer;font-family:var(--font);box-shadow:0 4px 16px rgba(0,0,0,0.2);';
+    hint.textContent = '\u70B9\u51FB\u6B64\u5904\u5F00\u542F\u58F0\u97F3';
+    hint.onclick = () => { remoteAudio.play(); hint.remove(); };
+    document.body.appendChild(hint);
+  });
+}
+
+function cleanupGroupAudio() {
+  document.querySelectorAll('[id^="audio-group-"]').forEach(el => { el.srcObject = null; el.remove(); });
 }
 
 // Group voice room state
 let currentRoomId = null;
-let groupPeerConnections = {}; // { socketId: RTCPeerConnection }
+let groupPeerConnections = {};
 let groupLocalStream = null;
 let groupCallTimer = null;
 let groupCallSeconds = 0;
@@ -76,12 +86,17 @@ function getAvatarColor(name) {
 }
 
 function getInitials(name) {
-  return name.charAt(0).toUpperCase();
+  return (name || '?').charAt(0).toUpperCase();
 }
 
 function setAvatar(el, name) {
   el.style.background = getAvatarColor(name);
   el.textContent = getInitials(name);
+}
+
+function esc(str) {
+  if (!str) return '';
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 function formatTime(ts) {
@@ -94,17 +109,18 @@ function formatTime(ts) {
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   if (d.toDateString() === yesterday.toDateString()) {
-    return `昨天 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return `\u6628\u5929 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
   return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 // ========== Toast ==========
 function showToast(msg) {
+  clearTimeout(toastTimer);
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2500);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2500);
 }
 
 // ========== Auth ==========
@@ -126,18 +142,20 @@ async function handleLogin(e) {
   e.preventDefault();
   const username = document.getElementById('loginUsername').value.trim();
   const password = document.getElementById('loginPassword').value;
-  if (!username || !password) return showAuthError('请输入账号和密码');
-
-  const res = await fetch('/api/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
-  });
-  const data = await res.json();
-  if (data.error) return showAuthError(data.error);
-
-  currentUser = data.user;
-  enterApp();
+  if (!username || !password) return showAuthError('\u8BF7\u8F93\u5165\u8D26\u53F7\u548C\u5BC6\u7801');
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (data.error) return showAuthError(data.error);
+    currentUser = data.user;
+    enterApp();
+  } catch (err) {
+    showAuthError('\u7F51\u7EDC\u9519\u8BEF\uFF0C\u8BF7\u91CD\u8BD5');
+  }
 }
 
 async function handleRegister(e) {
@@ -146,24 +164,26 @@ async function handleRegister(e) {
   const nickname = document.getElementById('regNickname').value.trim();
   const password = document.getElementById('regPassword').value;
   const password2 = document.getElementById('regPassword2').value;
-
-  if (!username || !password) return showAuthError('请填写账号和密码');
-  if (password !== password2) return showAuthError('两次密码不一致');
-
-  const res = await fetch('/api/register', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, nickname: nickname || username })
-  });
-  const data = await res.json();
-  if (data.error) return showAuthError(data.error);
-
-  currentUser = data.user;
-  showToast('注册成功');
-  enterApp();
+  if (!username || !password) return showAuthError('\u8BF7\u586B\u5199\u8D26\u53F7\u548C\u5BC6\u7801');
+  if (password !== password2) return showAuthError('\u4E24\u6B21\u5BC6\u7801\u4E0D\u4E00\u81F4');
+  try {
+    const res = await fetch('/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, nickname: nickname || username })
+    });
+    const data = await res.json();
+    if (data.error) return showAuthError(data.error);
+    currentUser = data.user;
+    showToast('\u6CE8\u518C\u6210\u529F');
+    enterApp();
+  } catch (err) {
+    showAuthError('\u7F51\u7EDC\u9519\u8BEF\uFF0C\u8BF7\u91CD\u8BD5');
+  }
 }
 
 function handleLogout() {
+  if (peerConnection || localStream) endCall(true);
   if (currentRoomId) leaveVoiceRoom();
   if (socket) socket.disconnect();
   currentUser = null;
@@ -172,6 +192,7 @@ function handleLogout() {
   friendRequests = [];
   messagesCache = {};
   unreadCounts = {};
+  activeTab = 'chats';
   document.getElementById('authPage').classList.remove('hidden');
   document.getElementById('appPage').classList.remove('active');
 }
@@ -180,15 +201,15 @@ function handleLogout() {
 function enterApp() {
   document.getElementById('authPage').classList.add('hidden');
   document.getElementById('appPage').classList.add('active');
-
-  // Setup profile
   document.getElementById('profileName').textContent = currentUser.nickname;
   document.getElementById('profileId').textContent = `@${currentUser.username}`;
   setAvatar(document.getElementById('profileAvatar'), currentUser.nickname);
 
-  // Connect socket
   socket = io();
-  socket.emit('login', currentUser.username);
+
+  socket.on('connect', () => {
+    socket.emit('login', currentUser.username);
+  });
 
   socket.on('online-users', (users) => {
     onlineUsersList = users;
@@ -204,7 +225,6 @@ function enterApp() {
     if (isInCurrentChat) {
       appendMessage(msg);
     } else if (msg.to === currentUser.username) {
-      // Unread message
       unreadCounts[msg.from] = (unreadCounts[msg.from] || 0) + 1;
       updateChatBadge();
     }
@@ -222,12 +242,12 @@ function enterApp() {
   });
 
   socket.on('friend-request', (data) => {
-    showToast(`${data.from.nickname} 请求添加你为好友`);
+    showToast(`${esc(data.from.nickname)} \u8BF7\u6C42\u6DFB\u52A0\u4F60\u4E3A\u597D\u53CB`);
     loadFriendRequests();
   });
 
   socket.on('friend-accepted', (data) => {
-    showToast(`${data.by.nickname} 接受了你的好友请求`);
+    showToast(`${esc(data.by.nickname)} \u63A5\u53D7\u4E86\u4F60\u7684\u597D\u53CB\u8BF7\u6C42`);
     loadFriends();
   });
 
@@ -245,8 +265,9 @@ function enterApp() {
 
   socket.on('friend-typing', (data) => {
     if (currentChat && data.from === currentChat.username) {
-      document.getElementById('chatStatus').textContent = '正在输入...';
-      setTimeout(() => updateChatStatus(), 2000);
+      document.getElementById('chatStatus').textContent = '\u6B63\u5728\u8F93\u5165...';
+      clearTimeout(typingTimer);
+      typingTimer = setTimeout(() => updateChatStatus(), 2000);
     }
   });
 
@@ -255,7 +276,7 @@ function enterApp() {
   socket.on('call-answered', handleCallAnswered);
   socket.on('ice-candidate', handleRemoteICE);
   socket.on('call-rejected', () => {
-    showToast('对方拒绝了通话');
+    showToast('\u5BF9\u65B9\u62D2\u7EDD\u4E86\u901A\u8BDD');
     endCall(true);
   });
   socket.on('call-ended', () => {
@@ -269,7 +290,7 @@ function enterApp() {
   });
   socket.on('voice-room-created', (data) => {
     currentRoomId = data.roomId;
-    showToast('语音房间已创建');
+    showToast('\u8BED\u97F3\u623F\u95F4\u5DF2\u521B\u5EFA');
     closePanel('voiceRoomPanel');
     showGroupCallOverlay(data.room);
   });
@@ -279,7 +300,6 @@ function enterApp() {
     showGroupCallOverlay(data.room);
   });
   socket.on('voice-room-peer-joined', async (data) => {
-    // Create offer for the new peer
     const pc = createGroupPeerConnection(data.socketId);
     groupPeerConnections[data.socketId] = pc;
     const offer = await pc.createOffer();
@@ -290,24 +310,26 @@ function enterApp() {
       offer,
       roomId: data.roomId
     });
-    // Update UI
     const room = voiceRoomsList.find(r => r.roomId === data.roomId);
     if (room) showGroupCallOverlay(room);
   });
   socket.on('voice-room-peer-left', (data) => {
-    const pc = groupPeerConnections[data.socketId || ''];
-    if (pc) {
-      pc.close();
-      delete groupPeerConnections[data.socketId || ''];
+    if (data.socketId) {
+      const pc = groupPeerConnections[data.socketId];
+      if (pc) { pc.close(); delete groupPeerConnections[data.socketId]; }
+      const audioEl = document.getElementById('audio-group-' + data.socketId);
+      if (audioEl) { audioEl.srcObject = null; audioEl.remove(); }
     }
     const room = voiceRoomsList.find(r => r.roomId === data.roomId);
-    if (room) {
-      showGroupCallOverlay(room);
-    }
-    if (data.username) showToast(`${data.username} 离开了房间`);
+    if (room) showGroupCallOverlay(room);
+    if (data.username) showToast(`${esc(data.username)} \u79BB\u5F00\u4E86\u623F\u95F4`);
   });
   socket.on('voice-room-error', (data) => {
     showToast(data.error);
+    if (groupLocalStream && !currentRoomId) {
+      groupLocalStream.getTracks().forEach(t => t.stop());
+      groupLocalStream = null;
+    }
   });
 
   // Group WebRTC
@@ -353,36 +375,42 @@ function openProfilePanel() {
 
 async function saveProfile() {
   const newNickname = document.getElementById('editNickname').value.trim();
-  if (!newNickname) return showToast('昵称不能为空');
-
-  const res = await fetch(`/api/user/${currentUser.username}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nickname: newNickname })
-  });
-  const data = await res.json();
-  if (data.error) return showToast(data.error);
-
-  currentUser = data.user;
-  document.getElementById('profileName').textContent = currentUser.nickname;
-  setAvatar(document.getElementById('profileAvatar'), currentUser.nickname);
-  closePanel('profilePanel');
-  showToast('资料已更新');
-  loadFriends();
+  if (!newNickname) return showToast('\u6635\u79F0\u4E0D\u80FD\u4E3A\u7A7A');
+  try {
+    const res = await fetch(`/api/user/${currentUser.username}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nickname: newNickname })
+    });
+    const data = await res.json();
+    if (data.error) return showToast(data.error);
+    currentUser = data.user;
+    document.getElementById('profileName').textContent = currentUser.nickname;
+    setAvatar(document.getElementById('profileAvatar'), currentUser.nickname);
+    closePanel('profilePanel');
+    showToast('\u8D44\u6599\u5DF2\u66F4\u65B0');
+    loadFriends();
+  } catch (err) {
+    showToast('\u4FDD\u5B58\u5931\u8D25');
+  }
 }
 
 // ========== Load Data ==========
 async function loadFriends() {
-  const res = await fetch(`/api/friends/${currentUser.username}`);
-  friends = await res.json();
-  renderContacts();
+  try {
+    const res = await fetch(`/api/friends/${currentUser.username}`);
+    friends = await res.json();
+    renderContacts();
+  } catch (err) {}
 }
 
 async function loadFriendRequests() {
-  const res = await fetch(`/api/friends/requests/${currentUser.username}`);
-  friendRequests = await res.json();
-  updateRequestBadge();
-  if (activeTab === 'requests') renderContacts();
+  try {
+    const res = await fetch(`/api/friends/requests/${currentUser.username}`);
+    friendRequests = await res.json();
+    updateRequestBadge();
+    if (activeTab === 'requests') renderContacts();
+  } catch (err) {}
 }
 
 function updateRequestBadge() {
@@ -437,8 +465,8 @@ function renderContacts() {
 
     if (items.length === 0) {
       list.innerHTML = `<div style="text-align:center; padding:40px 20px; color:var(--text-tertiary);">
-        ${activeTab === 'chats' ? '暂无消息' : '暂无好友'}
-        <br><small>点击右上角添加好友开始聊天</small>
+        ${activeTab === 'chats' ? '\u6682\u65E0\u6D88\u606F' : '\u6682\u65E0\u597D\u53CB'}
+        <br><small>\u70B9\u51FB\u53F3\u4E0A\u89D2\u6DFB\u52A0\u597D\u53CB\u5F00\u59CB\u804A\u5929</small>
       </div>`;
       return;
     }
@@ -450,18 +478,18 @@ function renderContacts() {
       const unread = unreadCounts[f.username] || 0;
       let preview = '';
       if (lastMsg) {
-        preview = lastMsg.recalled ? '[消息已撤回]' : (lastMsg.type === 'text' ? lastMsg.content : '[语音通话]');
+        preview = lastMsg.recalled ? '[\u6D88\u606F\u5DF2\u64A4\u56DE]' : (lastMsg.type === 'text' ? lastMsg.content : '[\u8BED\u97F3\u901A\u8BDD]');
         if (preview.length > 20) preview = preview.substring(0, 20) + '...';
       }
       return `
-        <div class="contact-item ${isActive ? 'active' : ''}" onclick="openChat('${f.username}')">
+        <div class="contact-item ${isActive ? 'active' : ''}" onclick="openChat('${esc(f.username)}')">
           <div class="avatar" style="background:${getAvatarColor(f.nickname)}">
-            ${getInitials(f.nickname)}
+            ${esc(getInitials(f.nickname))}
             ${isOnline ? '<span class="online-dot"></span>' : ''}
           </div>
           <div class="contact-info">
-            <div class="contact-name">${f.nickname}</div>
-            <div class="contact-preview">${preview || '@' + f.username}</div>
+            <div class="contact-name">${esc(f.nickname)}</div>
+            <div class="contact-preview">${esc(preview) || '@' + esc(f.username)}</div>
           </div>
           <div class="contact-meta">
             ${lastMsg ? `<span class="contact-time">${formatTime(lastMsg.createdAt)}</span>` : ''}
@@ -471,13 +499,12 @@ function renderContacts() {
       `;
     }).join('');
   } else if (activeTab === 'voice') {
-    // Voice rooms tab
     const rooms = voiceRoomsList;
     if (rooms.length === 0) {
       list.innerHTML = `
         <div style="text-align:center; padding:40px 20px; color:var(--text-tertiary);">
-          暂无语音房间<br>
-          <small style="color:var(--accent); cursor:pointer;" onclick="openVoiceRooms()">创建一个房间</small>
+          \u6682\u65E0\u8BED\u97F3\u623F\u95F4<br>
+          <small style="color:var(--accent); cursor:pointer;" onclick="openVoiceRooms()">\u521B\u5EFA\u4E00\u4E2A\u623F\u95F4</small>
         </div>`;
       return;
     }
@@ -489,37 +516,38 @@ function renderContacts() {
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
           </div>
           <div class="voice-room-info">
-            <div class="voice-room-name">${r.name}</div>
-            <div class="voice-room-meta">${r.creatorUser ? r.creatorUser.nickname : '未知'} 创建 · ${r.participantCount} 人</div>
+            <div class="voice-room-name">${esc(r.name)}</div>
+            <div class="voice-room-meta">${esc(r.creatorUser ? r.creatorUser.nickname : '\u672A\u77E5')} \u521B\u5EFA \xB7 ${r.participantCount} \u4EBA</div>
             <div class="voice-room-avatars">
-              ${r.participants.slice(0, 5).map(p => `
-                <div class="avatar" style="background:${getAvatarColor(p.user ? p.user.nickname : p.username)}">${getInitials(p.user ? p.user.nickname : p.username)}</div>
-              `).join('')}
+              ${r.participants.slice(0, 5).map(p => {
+                const nick = p.user ? p.user.nickname : p.username;
+                return `<div class="avatar" style="background:${getAvatarColor(nick)}">${esc(getInitials(nick))}</div>`;
+              }).join('')}
               ${r.participantCount > 5 ? `<div class="avatar" style="background:var(--bg-tertiary); font-size:10px; color:var(--text-secondary);">+${r.participantCount - 5}</div>` : ''}
             </div>
           </div>
           ${isInRoom
-            ? '<button class="btn-join-room" style="background:var(--red);" onclick="leaveVoiceRoom()">离开</button>'
-            : `<button class="btn-join-room" onclick="joinVoiceRoom('${r.roomId}')">加入</button>`
+            ? '<button class="btn-join-room" style="background:var(--red);" onclick="leaveVoiceRoom()">\u79BB\u5F00</button>'
+            : `<button class="btn-join-room" onclick="joinVoiceRoom('${esc(r.roomId)}')">加入</button>`
           }
         </div>
       `;
     }).join('');
   } else if (activeTab === 'requests') {
     if (friendRequests.length === 0) {
-      list.innerHTML = `<div style="text-align:center; padding:40px 20px; color:var(--text-tertiary);">暂无好友请求</div>`;
+      list.innerHTML = `<div style="text-align:center; padding:40px 20px; color:var(--text-tertiary);">\u6682\u65E0\u597D\u53CB\u8BF7\u6C42</div>`;
       return;
     }
     list.innerHTML = friendRequests.map(r => `
       <div class="request-item">
-        <div class="avatar" style="background:${getAvatarColor(r.fromUser.nickname)}">${getInitials(r.fromUser.nickname)}</div>
+        <div class="avatar" style="background:${getAvatarColor(r.fromUser.nickname)}">${esc(getInitials(r.fromUser.nickname))}</div>
         <div class="search-result-info">
-          <div class="search-result-name">${r.fromUser.nickname}</div>
-          <div class="search-result-id">@${r.fromUser.username}</div>
+          <div class="search-result-name">${esc(r.fromUser.nickname)}</div>
+          <div class="search-result-id">@${esc(r.fromUser.username)}</div>
         </div>
         <div class="request-actions">
-          <button class="btn-accept" onclick="acceptRequest('${r.from}')">接受</button>
-          <button class="btn-reject" onclick="rejectRequest('${r.from}')">拒绝</button>
+          <button class="btn-accept" onclick="acceptRequest('${esc(r.from)}')">接受</button>
+          <button class="btn-reject" onclick="rejectRequest('${esc(r.from)}')">拒绝</button>
         </div>
       </div>
     `).join('');
@@ -536,11 +564,9 @@ async function openChat(username) {
   if (!friend) return;
   currentChat = friend;
 
-  // Clear unread for this chat
   delete unreadCounts[username];
   updateChatBadge();
 
-  // Show UI immediately
   document.getElementById('noSelection').style.display = 'none';
   document.getElementById('chatView').style.display = 'flex';
 
@@ -548,27 +574,26 @@ async function openChat(username) {
   document.getElementById('chatName').textContent = friend.nickname;
   updateChatStatus();
 
-  // Mobile: hide sidebar, show chat
   if (window.innerWidth <= 768) {
     document.getElementById('sidebar').classList.add('hidden-mobile');
   }
 
   document.getElementById('messageInput').focus();
 
-  // Load messages asynchronously (non-blocking)
   const key = [currentUser.username, username].sort().join(':');
   if (!messagesCache[key] || messagesCache[key].length === 0) {
-    document.getElementById('messagesContainer').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-tertiary);">加载中...</div>';
+    document.getElementById('messagesContainer').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-tertiary);">\u52A0\u8F7D\u4E2D...</div>';
   } else {
     renderMessages();
   }
 
-  const res = await fetch(`/api/messages/${currentUser.username}/${username}`);
-  messagesCache[key] = await res.json();
-
-  if (currentChat && currentChat.username === username) {
-    renderMessages();
-  }
+  try {
+    const res = await fetch(`/api/messages/${currentUser.username}/${username}`);
+    messagesCache[key] = await res.json();
+    if (currentChat && currentChat.username === username) {
+      renderMessages();
+    }
+  } catch (err) {}
   renderContacts();
 }
 
@@ -580,10 +605,10 @@ function updateChatStatus() {
   if (!currentChat) return;
   const status = document.getElementById('chatStatus');
   if (onlineUsersList.includes(currentChat.username)) {
-    status.textContent = '在线';
+    status.textContent = '\u5728\u7EBF';
     status.style.color = 'var(--green)';
   } else {
-    status.textContent = '离线';
+    status.textContent = '\u79BB\u7EBF';
     status.style.color = 'var(--text-tertiary)';
   }
 }
@@ -592,7 +617,6 @@ function renderMessages() {
   const container = document.getElementById('messagesContainer');
   const key = [currentUser.username, currentChat.username].sort().join(':');
   const msgs = (messagesCache[key] || []).filter(m => !(m.deletedBy && m.deletedBy.includes(currentUser.username)));
-
   container.innerHTML = msgs.map(m => createMessageHTML(m)).join('');
   container.scrollTop = container.scrollHeight;
 }
@@ -601,16 +625,15 @@ function createMessageHTML(m) {
   const isSent = m.from === currentUser.username;
   const canRecall = isSent && !m.recalled && (Date.now() - m.createdAt <= 120000);
   const bubbleText = m.recalled
-    ? (isSent ? '你撤回了一条消息' : '对方撤回了一条消息')
-    : escapeHtml(m.content);
+    ? (isSent ? '\u4F60\u64A4\u56DE\u4E86\u4E00\u6761\u6D88\u606F' : '\u5BF9\u65B9\u64A4\u56DE\u4E86\u4E00\u6761\u6D88\u606F')
+    : esc(m.content);
   const bubbleClass = m.recalled ? 'message-bubble recalled' : 'message-bubble';
-  // Menu available for all non-recalled messages (delete is personal, recall only for own)
   const showMenu = !m.recalled;
   return `
     <div class="message-group ${isSent ? 'sent' : 'received'}" data-msg-id="${m.id}" data-msg-from="${m.from}">
       <div class="${bubbleClass}"${showMenu ? ` oncontextmenu="showMsgMenu(event,'${m.id}',${canRecall})" ontouchstart="handleTouchStart(event,'${m.id}',${canRecall})" ontouchend="handleTouchEnd(event)" ontouchmove="handleTouchMove(event)"` : ''}>${bubbleText}</div>
     </div>
-    <div class="message-time">${formatTime(m.createdAt)}${m.recalled ? ' · 已撤回' : ''}</div>
+    <div class="message-time">${formatTime(m.createdAt)}${m.recalled ? ' \xB7 \u5DF2\u64A4\u56DE' : ''}</div>
   `;
 }
 
@@ -633,25 +656,18 @@ function handleTouchStart(e, msgId, canRecall) {
 }
 
 function handleTouchEnd(e) {
-  if (msgMenuTimer) {
-    clearTimeout(msgMenuTimer);
-    msgMenuTimer = null;
-  }
+  if (msgMenuTimer) { clearTimeout(msgMenuTimer); msgMenuTimer = null; }
 }
 
 function handleTouchMove(e) {
   touchMoved = true;
-  if (msgMenuTimer) {
-    clearTimeout(msgMenuTimer);
-    msgMenuTimer = null;
-  }
+  if (msgMenuTimer) { clearTimeout(msgMenuTimer); msgMenuTimer = null; }
 }
 
 function showMsgMenu(e, msgId, canRecall) {
   e.preventDefault();
   hideMsgMenu();
   msgMenuTarget = msgId;
-
   const menu = document.createElement('div');
   menu.id = 'msgMenu';
   menu.className = 'msg-menu';
@@ -659,15 +675,11 @@ function showMsgMenu(e, msgId, canRecall) {
     ${canRecall ? '<div class="msg-menu-item" onclick="recallMessageById(msgMenuTarget)">撤回</div>' : ''}
     <div class="msg-menu-item" onclick="deleteMessageById(msgMenuTarget)">删除</div>
   `;
-
   const x = e.clientX || (e.touches && e.touches[0] ? e.touches[0].clientX : 0);
   const y = e.clientY || (e.touches && e.touches[0] ? e.touches[0].clientY : 0);
   menu.style.left = Math.max(8, Math.min(x - 60, window.innerWidth - 140)) + 'px';
   menu.style.top = Math.max(8, y - (canRecall ? 80 : 40)) + 'px';
-
   document.body.appendChild(menu);
-
-  // Close on click elsewhere
   setTimeout(() => {
     document.addEventListener('click', hideMsgMenu, { once: true });
   }, 10);
@@ -683,12 +695,9 @@ async function recallMessageById(msgId) {
   hideMsgMenu();
   try {
     const res = await fetch(`/api/messages/${msgId}/recall?by=${currentUser.username}`, { method: 'POST' });
+    if (!res.ok) { showToast('\u64A4\u56DE\u5931\u8D25'); return; }
     const data = await res.json();
-    if (data.error) {
-      showToast(data.error);
-      return;
-    }
-    // Update local cache
+    if (data.error) { showToast(data.error); return; }
     const msg = data.message;
     const key = [msg.from, msg.to].sort().join(':');
     if (messagesCache[key]) {
@@ -698,9 +707,9 @@ async function recallMessageById(msgId) {
     if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
       renderMessages();
     }
-    showToast('已撤回');
+    showToast('\u5DF2\u64A4\u56DE');
   } catch (err) {
-    showToast('撤回失败');
+    showToast('\u64A4\u56DE\u5931\u8D25');
   }
 }
 
@@ -708,33 +717,29 @@ async function deleteMessageById(msgId) {
   hideMsgMenu();
   try {
     const res = await fetch(`/api/messages/${msgId}?by=${currentUser.username}`, { method: 'DELETE' });
+    if (!res.ok) { showToast('\u5220\u9664\u5931\u8D25'); return; }
     const data = await res.json();
-    if (data.error) {
-      showToast(data.error);
-      return;
-    }
-    // Update local cache: mark as deleted for current user
+    if (data.error) { showToast(data.error); return; }
     const msg = data.message;
     const key = [msg.from, msg.to].sort().join(':');
     if (messagesCache[key]) {
       const cached = messagesCache[key].find(m => m.id === msg.id);
       if (cached) {
         if (!cached.deletedBy) cached.deletedBy = [];
-        if (!cached.deletedBy.includes(currentUser.username)) {
-          cached.deletedBy.push(currentUser.username);
-        }
+        if (!cached.deletedBy.includes(currentUser.username)) cached.deletedBy.push(currentUser.username);
       }
     }
     if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
       renderMessages();
     }
-    showToast('已删除');
+    showToast('\u5DF2\u5220\u9664');
   } catch (err) {
-    showToast('删除失败');
+    showToast('\u5220\u9664\u5931\u8D25');
   }
 }
 
 function escapeHtml(text) {
+  if (!text) return '';
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
@@ -764,14 +769,12 @@ function sendMessage() {
   const input = document.getElementById('messageInput');
   const content = input.value.trim();
   if (!content || !currentChat) return;
-
   socket.emit('send-message', {
     from: currentUser.username,
     to: currentChat.username,
     content,
     type: 'text'
   });
-
   input.value = '';
   document.getElementById('sendBtn').disabled = true;
 }
@@ -780,7 +783,7 @@ function sendMessage() {
 function openSearchPanel() {
   document.getElementById('searchPanel').classList.add('active');
   document.getElementById('searchInput').value = '';
-  document.getElementById('searchResults').innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">输入关键词搜索用户</p>';
+  document.getElementById('searchResults').innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">\u8F93\u5165\u5173\u952E\u8BCD\u641C\u7D22\u7528\u6237</p>';
   setTimeout(() => document.getElementById('searchInput').focus(), 100);
 }
 
@@ -801,108 +804,120 @@ async function searchUsers() {
   clearTimeout(searchTimeout);
   const q = document.getElementById('searchInput').value.trim();
   if (!q) {
-    document.getElementById('searchResults').innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">输入关键词搜索用户</p>';
+    document.getElementById('searchResults').innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">\u8F93\u5165\u5173\u952E\u8BCD\u641C\u7D22\u7528\u6237</p>';
     return;
   }
   searchTimeout = setTimeout(async () => {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    const users = await res.json();
-    const results = document.getElementById('searchResults');
-
-    const filtered = users.filter(u => u.username !== currentUser.username);
-    if (filtered.length === 0) {
-      results.innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">未找到用户</p>';
-      return;
-    }
-
-    results.innerHTML = filtered.map(u => {
-      const isFriend = friends.some(f => f.username === u.username);
-      return `
-        <div class="search-result-item">
-          <div class="avatar sm" style="background:${getAvatarColor(u.nickname)}">${getInitials(u.nickname)}</div>
-          <div class="search-result-info">
-            <div class="search-result-name">${u.nickname}</div>
-            <div class="search-result-id">@${u.username}</div>
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const users = await res.json();
+      const results = document.getElementById('searchResults');
+      const filtered = users.filter(u => u.username !== currentUser.username);
+      if (filtered.length === 0) {
+        results.innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">\u672A\u627E\u5230\u7528\u6237</p>';
+        return;
+      }
+      results.innerHTML = filtered.map(u => {
+        const isFriend = friends.some(f => f.username === u.username);
+        return `
+          <div class="search-result-item">
+            <div class="avatar sm" style="background:${getAvatarColor(u.nickname)}">${esc(getInitials(u.nickname))}</div>
+            <div class="search-result-info">
+              <div class="search-result-name">${esc(u.nickname)}</div>
+              <div class="search-result-id">@${esc(u.username)}</div>
+            </div>
+            ${isFriend
+              ? '<button class="btn-add added">\u5DF2\u6DFB\u52A0</button>'
+              : `<button class="btn-add" onclick="addFriend('${esc(u.username)}', this)">添加</button>`
+            }
           </div>
-          ${isFriend
-            ? '<button class="btn-add added">已添加</button>'
-            : `<button class="btn-add" onclick="addFriend('${u.username}', this)">添加</button>`
-          }
-        </div>
-      `;
-    }).join('');
+        `;
+      }).join('');
+    } catch (err) {
+      document.getElementById('searchResults').innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">\u641C\u7D22\u5931\u8D25</p>';
+    }
   }, 300);
 }
 
 async function addFriend(username, btn) {
-  const res = await fetch('/api/friends/request', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: currentUser.username, to: username })
-  });
-  const data = await res.json();
-  if (data.error) {
-    showToast(data.error);
-  } else {
-    btn.textContent = '已发送';
-    btn.classList.add('added');
-    showToast(data.autoAccepted ? '已互加好友' : '好友请求已发送');
-    loadFriends();
+  try {
+    const res = await fetch('/api/friends/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: currentUser.username, to: username })
+    });
+    const data = await res.json();
+    if (data.error) {
+      showToast(data.error);
+    } else {
+      btn.textContent = '\u5DF2\u53D1\u9001';
+      btn.classList.add('added');
+      showToast(data.autoAccepted ? '\u5DF2\u4E92\u52A0\u597D\u53CB' : '\u597D\u53CB\u8BF7\u6C42\u5DF2\u53D1\u9001');
+      loadFriends();
+    }
+  } catch (err) {
+    showToast('\u7F51\u7EDC\u9519\u8BEF');
   }
 }
 
 async function loadQRCode() {
-  const res = await fetch(`/api/qrcode/${currentUser.username}`);
-  const data = await res.json();
-  if (data.qr) {
-    document.getElementById('qrImage').src = data.qr;
-    document.getElementById('qrImage').style.display = 'block';
-  }
+  try {
+    const res = await fetch(`/api/qrcode/${currentUser.username}`);
+    const data = await res.json();
+    if (data.qr) {
+      document.getElementById('qrImage').src = data.qr;
+      document.getElementById('qrImage').style.display = 'block';
+    }
+  } catch (err) {}
 }
 
 // ========== Friend Requests ==========
 async function acceptRequest(from) {
-  const res = await fetch('/api/friends/accept', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, to: currentUser.username })
-  });
-  const data = await res.json();
-  if (data.success) {
-    showToast('已添加好友');
-    loadFriends();
-    loadFriendRequests();
-  }
+  try {
+    const res = await fetch('/api/friends/accept', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: currentUser.username })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('\u5DF2\u6DFB\u52A0\u597D\u53CB');
+      loadFriends();
+      loadFriendRequests();
+    }
+  } catch (err) {}
 }
 
 async function rejectRequest(from) {
-  const res = await fetch('/api/friends/reject', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from, to: currentUser.username })
-  });
-  const data = await res.json();
-  if (data.success) {
-    showToast('已拒绝');
-    loadFriendRequests();
-  }
+  try {
+    const res = await fetch('/api/friends/reject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, to: currentUser.username })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('\u5DF2\u62D2\u7EDD');
+      loadFriendRequests();
+    }
+  } catch (err) {}
 }
 
 // ========== 1-on-1 Voice Call (WebRTC) ==========
 async function startVoiceCall() {
   if (!currentChat) return;
+  if (peerConnection || localStream) { showToast('\u901A\u8BDD\u4E2D'); return; }
   if (!onlineUsersList.includes(currentChat.username)) {
-    showToast('对方不在线');
+    showToast('\u5BF9\u65B9\u4E0D\u5728\u7EBF');
     return;
   }
 
-  // Show calling UI immediately
   showCallOverlay(currentChat.nickname, 'calling');
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
-    showToast('无法访问麦克风');
+    showToast('\u65E0\u6CD5\u8BBF\u95EE\u9EA6\u514B\u98CE');
     endCall(true);
     return;
   }
@@ -918,8 +933,15 @@ async function startVoiceCall() {
 
   peerConnection.ontrack = (e) => {
     playRemoteAudio(e.streams[0]);
-    document.getElementById('callStatus').textContent = '通话中';
+    document.getElementById('callStatus').textContent = '\u901A\u8BDD\u4E2D';
     startCallTimer();
+  };
+
+  peerConnection.onconnectionstatechange = () => {
+    if (peerConnection && (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'disconnected')) {
+      showToast('\u8FDE\u63A5\u5DF2\u65AD\u5F00');
+      endCall(true);
+    }
   };
 
   const offer = await peerConnection.createOffer();
@@ -932,6 +954,10 @@ async function startVoiceCall() {
 }
 
 function handleIncomingCall(data) {
+  if (peerConnection || localStream) {
+    socket.emit('call-reject', { to: data.from });
+    return;
+  }
   incomingCallData = data;
   showCallOverlay(data.fromUser.nickname, 'incoming');
 }
@@ -956,7 +982,7 @@ async function acceptIncomingCall() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
-    showToast('无法访问麦克风');
+    showToast('\u65E0\u6CD5\u8BBF\u95EE\u9EA6\u514B\u98CE');
     endCall(true);
     return;
   }
@@ -972,8 +998,15 @@ async function acceptIncomingCall() {
 
   peerConnection.ontrack = (e) => {
     playRemoteAudio(e.streams[0]);
-    document.getElementById('callStatus').textContent = '通话中';
+    document.getElementById('callStatus').textContent = '\u901A\u8BDD\u4E2D';
     startCallTimer();
+  };
+
+  peerConnection.onconnectionstatechange = () => {
+    if (peerConnection && (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'disconnected')) {
+      showToast('\u8FDE\u63A5\u5DF2\u65AD\u5F00');
+      endCall(true);
+    }
   };
 
   await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
@@ -994,35 +1027,21 @@ function endCall(fromRemote) {
   if (isEndingCall) return;
   isEndingCall = true;
 
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
-  }
-  if (localStream) {
-    localStream.getTracks().forEach(t => t.stop());
-    localStream = null;
-  }
-  if (remoteAudio) {
-    remoteAudio.srcObject = null;
-    remoteAudio.remove();
-    remoteAudio = null;
-  }
+  if (peerConnection) { peerConnection.close(); peerConnection = null; }
+  if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio.remove(); remoteAudio = null; }
   const hint = document.getElementById('audioHint');
   if (hint) hint.remove();
-  if (callTimer) {
-    clearInterval(callTimer);
-    callTimer = null;
-  }
+  if (callTimer) { clearInterval(callTimer); callTimer = null; }
   callSeconds = 0;
   incomingCallData = null;
   document.getElementById('callOverlay').classList.remove('active');
 
-  // Only emit call-end and show toast if user initiated
   if (!fromRemote && currentChat && socket) {
     socket.emit('call-end', { to: currentChat.username });
-    showToast('通话已结束');
+    showToast('\u901A\u8BDD\u5DF2\u7ED3\u675F');
   } else if (fromRemote) {
-    showToast('对方已结束通话');
+    showToast('\u5BF9\u65B9\u5DF2\u7ED3\u675F\u901A\u8BDD');
   }
 
   setTimeout(() => { isEndingCall = false; }, 500);
@@ -1031,14 +1050,12 @@ function endCall(fromRemote) {
 function showCallOverlay(name, type) {
   const overlay = document.getElementById('callOverlay');
   overlay.classList.add('active');
-
   document.getElementById('callName').textContent = name;
   setAvatar(document.getElementById('callAvatar'), name);
-
   const actions = document.getElementById('callActions');
 
   if (type === 'calling') {
-    document.getElementById('callStatus').textContent = '正在呼叫...';
+    document.getElementById('callStatus').textContent = '\u6B63\u5728\u547C\u53EB...';
     document.getElementById('callTimer').style.display = 'none';
     actions.innerHTML = `
       <button class="call-action-btn end-call" onclick="endCall()">
@@ -1046,7 +1063,7 @@ function showCallOverlay(name, type) {
       </button>
     `;
   } else if (type === 'incoming') {
-    document.getElementById('callStatus').textContent = '来电...';
+    document.getElementById('callStatus').textContent = '\u6765\u7535...';
     document.getElementById('callTimer').style.display = 'none';
     actions.innerHTML = `
       <button class="call-action-btn reject-call" onclick="rejectIncomingCall()">
@@ -1080,7 +1097,7 @@ function openVoiceRooms() {
 function renderVoiceRoomList() {
   const list = document.getElementById('voiceRoomList');
   if (voiceRoomsList.length === 0) {
-    list.innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">暂无语音房间，创建一个吧</p>';
+    list.innerHTML = '<p style="color:var(--text-tertiary); text-align:center; padding:24px 0;">\u6682\u65E0\u8BED\u97F3\u623F\u95F4\uFF0C\u521B\u5EFA\u4E00\u4E2A\u5427</p>';
     return;
   }
   list.innerHTML = voiceRoomsList.map(r => {
@@ -1091,12 +1108,12 @@ function renderVoiceRoomList() {
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
         </div>
         <div class="voice-room-info">
-          <div class="voice-room-name">${r.name}</div>
-          <div class="voice-room-meta">${r.creatorUser ? r.creatorUser.nickname : ''} · ${r.participantCount} 人</div>
+          <div class="voice-room-name">${esc(r.name)}</div>
+          <div class="voice-room-meta">${esc(r.creatorUser ? r.creatorUser.nickname : '')} \xB7 ${r.participantCount} \u4EBA</div>
         </div>
         ${isInRoom
-          ? '<button class="btn-join-room" style="background:var(--red);" onclick="leaveVoiceRoom(); closePanel(\'voiceRoomPanel\');">离开</button>'
-          : `<button class="btn-join-room" onclick="joinVoiceRoom('${r.roomId}')">加入</button>`
+          ? '<button class="btn-join-room" style="background:var(--red);" onclick="leaveVoiceRoom(); closePanel(\'voiceRoomPanel\');">\u79BB\u5F00</button>'
+          : `<button class="btn-join-room" onclick="joinVoiceRoom('${esc(r.roomId)}')">加入</button>`
         }
       </div>
     `;
@@ -1104,11 +1121,11 @@ function renderVoiceRoomList() {
 }
 
 async function createVoiceRoom() {
-  const name = document.getElementById('newRoomName').value.trim() || `${currentUser.nickname}的房间`;
+  const name = document.getElementById('newRoomName').value.trim() || `${currentUser.nickname}\u7684\u623F\u95F4`;
   try {
     groupLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
-    showToast('无法访问麦克风');
+    showToast('\u65E0\u6CD5\u8BBF\u95EE\u9EA6\u514B\u98CE');
     return;
   }
   socket.emit('create-voice-room', { username: currentUser.username, name });
@@ -1119,7 +1136,7 @@ async function joinVoiceRoom(roomId) {
   try {
     groupLocalStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
-    showToast('无法访问麦克风');
+    showToast('\u65E0\u6CD5\u8BBF\u95EE\u9EA6\u514B\u98CE');
     return;
   }
   socket.emit('join-voice-room', { roomId, username: currentUser.username });
@@ -1136,8 +1153,9 @@ function createGroupPeerConnection(targetSocketId) {
     }
   };
   pc.ontrack = (e) => {
-    playRemoteAudio(e.streams[0]);
-    document.getElementById('groupCallStatus').textContent = '通话中';
+    // Use separate audio elements for each group peer
+    playRemoteAudio(e.streams[0], 'group-' + targetSocketId);
+    document.getElementById('groupCallStatus').textContent = '\u901A\u8BDD\u4E2D';
     if (!groupCallTimer) startGroupCallTimer();
   };
   return pc;
@@ -1147,29 +1165,25 @@ function showGroupCallOverlay(room) {
   const overlay = document.getElementById('groupCallOverlay');
   overlay.style.display = 'flex';
   overlay.classList.add('active');
-
-  document.getElementById('groupRoomName').textContent = room.name || '语音房间';
+  document.getElementById('groupRoomName').textContent = room.name || '\u8BED\u97F3\u623F\u95F4';
   if (!groupCallTimer) {
-    document.getElementById('groupCallStatus').textContent = '等待其他人加入...';
+    document.getElementById('groupCallStatus').textContent = '\u7B49\u5F85\u5176\u4ED6\u4EBA\u52A0\u5165...';
   }
-
   const container = document.getElementById('groupParticipants');
-  // Show self
   let html = `
     <div class="group-participant speaking">
-      <div class="avatar" style="background:${getAvatarColor(currentUser.nickname)}">${getInitials(currentUser.nickname)}</div>
-      <div class="group-participant-name">${currentUser.nickname}（我）</div>
+      <div class="avatar" style="background:${getAvatarColor(currentUser.nickname)}">${esc(getInitials(currentUser.nickname))}</div>
+      <div class="group-participant-name">${esc(currentUser.nickname)}\uFF08\u6211\uFF09</div>
     </div>
   `;
-  // Show other participants
   if (room.participants) {
     room.participants.forEach(p => {
       if (p.username !== currentUser.username) {
         const nick = p.user ? p.user.nickname : p.username;
         html += `
           <div class="group-participant">
-            <div class="avatar" style="background:${getAvatarColor(nick)}">${getInitials(nick)}</div>
-            <div class="group-participant-name">${nick}</div>
+            <div class="avatar" style="background:${getAvatarColor(nick)}">${esc(getInitials(nick))}</div>
+            <div class="group-participant-name">${esc(nick)}</div>
           </div>
         `;
       }
@@ -1192,38 +1206,21 @@ function startGroupCallTimer() {
 
 function leaveVoiceRoom() {
   if (!currentRoomId) return;
-
-  // Close all peer connections
-  for (const sid in groupPeerConnections) {
-    groupPeerConnections[sid].close();
-  }
+  for (const sid in groupPeerConnections) { groupPeerConnections[sid].close(); }
   groupPeerConnections = {};
-
-  if (groupLocalStream) {
-    groupLocalStream.getTracks().forEach(t => t.stop());
-    groupLocalStream = null;
-  }
-  if (remoteAudio) {
-    remoteAudio.srcObject = null;
-    remoteAudio.remove();
-    remoteAudio = null;
-  }
+  if (groupLocalStream) { groupLocalStream.getTracks().forEach(t => t.stop()); groupLocalStream = null; }
+  if (remoteAudio) { remoteAudio.srcObject = null; remoteAudio.remove(); remoteAudio = null; }
+  cleanupGroupAudio();
   const hint = document.getElementById('audioHint');
   if (hint) hint.remove();
-  if (groupCallTimer) {
-    clearInterval(groupCallTimer);
-    groupCallTimer = null;
-  }
+  if (groupCallTimer) { clearInterval(groupCallTimer); groupCallTimer = null; }
   groupCallSeconds = 0;
-
   socket.emit('leave-voice-room', { roomId: currentRoomId });
   currentRoomId = null;
-
   document.getElementById('groupCallOverlay').style.display = 'none';
   document.getElementById('groupCallOverlay').classList.remove('active');
   document.getElementById('groupCallTimer').style.display = 'none';
-
-  showToast('已离开语音房间');
+  showToast('\u5DF2\u79BB\u5F00\u8BED\u97F3\u623F\u95F4');
   renderContacts();
 }
 
