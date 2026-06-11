@@ -7,6 +7,7 @@ let friends = [];
 let friendRequests = [];
 let activeTab = 'chats';
 let messagesCache = {};
+let unreadCounts = {}; // { username: count }
 
 // Voice call state
 let peerConnection = null;
@@ -14,6 +15,8 @@ let localStream = null;
 let callTimer = null;
 let callSeconds = 0;
 let remoteAudio = null;
+let isEndingCall = false; // prevent call-end loop
+let incomingCallData = null; // store incoming call data
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -168,6 +171,7 @@ function handleLogout() {
   friends = [];
   friendRequests = [];
   messagesCache = {};
+  unreadCounts = {};
   document.getElementById('authPage').classList.remove('hidden');
   document.getElementById('appPage').classList.remove('active');
 }
@@ -196,8 +200,13 @@ function enterApp() {
     const key = [msg.from, msg.to].sort().join(':');
     if (!messagesCache[key]) messagesCache[key] = [];
     messagesCache[key].push(msg);
-    if (currentChat && (msg.from === currentChat.username || msg.to === currentChat.username)) {
+    const isInCurrentChat = currentChat && (msg.from === currentChat.username || msg.to === currentChat.username);
+    if (isInCurrentChat) {
       appendMessage(msg);
+    } else if (msg.to === currentUser.username) {
+      // Unread message
+      unreadCounts[msg.from] = (unreadCounts[msg.from] || 0) + 1;
+      updateChatBadge();
     }
     renderContacts();
   });
@@ -247,11 +256,10 @@ function enterApp() {
   socket.on('ice-candidate', handleRemoteICE);
   socket.on('call-rejected', () => {
     showToast('对方拒绝了通话');
-    endCall();
+    endCall(true);
   });
   socket.on('call-ended', () => {
-    showToast('通话已结束');
-    endCall();
+    endCall(true);
   });
 
   // Group voice room signaling
@@ -387,6 +395,17 @@ function updateRequestBadge() {
   }
 }
 
+function updateChatBadge() {
+  const badge = document.getElementById('chatBadge');
+  const total = Object.values(unreadCounts).reduce((s, c) => s + c, 0);
+  if (total > 0) {
+    badge.style.display = 'flex';
+    badge.textContent = total > 99 ? '99+' : total;
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
 // ========== Sidebar Tabs ==========
 function switchSidebarTab(tab) {
   activeTab = tab;
@@ -428,9 +447,10 @@ function renderContacts() {
       const isOnline = onlineUsersList.includes(f.username);
       const isActive = currentChat && currentChat.username === f.username;
       const lastMsg = f.lastMsg;
+      const unread = unreadCounts[f.username] || 0;
       let preview = '';
       if (lastMsg) {
-        preview = lastMsg.type === 'text' ? lastMsg.content : '[语音通话]';
+        preview = lastMsg.recalled ? '[消息已撤回]' : (lastMsg.type === 'text' ? lastMsg.content : '[语音通话]');
         if (preview.length > 20) preview = preview.substring(0, 20) + '...';
       }
       return `
@@ -443,7 +463,10 @@ function renderContacts() {
             <div class="contact-name">${f.nickname}</div>
             <div class="contact-preview">${preview || '@' + f.username}</div>
           </div>
-          ${lastMsg ? `<span class="contact-time">${formatTime(lastMsg.createdAt)}</span>` : ''}
+          <div class="contact-meta">
+            ${lastMsg ? `<span class="contact-time">${formatTime(lastMsg.createdAt)}</span>` : ''}
+            ${unread > 0 ? `<span class="unread-badge">${unread > 99 ? '99+' : unread}</span>` : ''}
+          </div>
         </div>
       `;
     }).join('');
@@ -513,6 +536,11 @@ async function openChat(username) {
   if (!friend) return;
   currentChat = friend;
 
+  // Clear unread for this chat
+  delete unreadCounts[username];
+  updateChatBadge();
+
+  // Show UI immediately
   document.getElementById('noSelection').style.display = 'none';
   document.getElementById('chatView').style.display = 'flex';
 
@@ -520,20 +548,28 @@ async function openChat(username) {
   document.getElementById('chatName').textContent = friend.nickname;
   updateChatStatus();
 
-  // Load messages
-  const res = await fetch(`/api/messages/${currentUser.username}/${username}`);
-  const key = [currentUser.username, username].sort().join(':');
-  messagesCache[key] = await res.json();
-
-  renderMessages();
-  renderContacts();
-
   // Mobile: hide sidebar, show chat
   if (window.innerWidth <= 768) {
     document.getElementById('sidebar').classList.add('hidden-mobile');
   }
 
   document.getElementById('messageInput').focus();
+
+  // Load messages asynchronously (non-blocking)
+  const key = [currentUser.username, username].sort().join(':');
+  if (!messagesCache[key] || messagesCache[key].length === 0) {
+    document.getElementById('messagesContainer').innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-tertiary);">加载中...</div>';
+  } else {
+    renderMessages();
+  }
+
+  const res = await fetch(`/api/messages/${currentUser.username}/${username}`);
+  messagesCache[key] = await res.json();
+
+  if (currentChat && currentChat.username === username) {
+    renderMessages();
+  }
+  renderContacts();
 }
 
 function closeChatMobile() {
@@ -860,14 +896,16 @@ async function startVoiceCall() {
     return;
   }
 
+  // Show calling UI immediately
+  showCallOverlay(currentChat.nickname, 'calling');
+
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
     showToast('无法访问麦克风');
+    endCall(true);
     return;
   }
-
-  showCallOverlay(currentChat.nickname, 'calling');
 
   peerConnection = new RTCPeerConnection(ICE_SERVERS);
   localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
@@ -894,7 +932,8 @@ async function startVoiceCall() {
 }
 
 function handleIncomingCall(data) {
-  showCallOverlay(data.fromUser.nickname, 'incoming', data);
+  incomingCallData = data;
+  showCallOverlay(data.fromUser.nickname, 'incoming');
 }
 
 async function handleCallAnswered(data) {
@@ -909,12 +948,16 @@ async function handleRemoteICE(data) {
   }
 }
 
-async function acceptIncomingCall(data) {
+async function acceptIncomingCall() {
+  const data = incomingCallData;
+  if (!data) return;
+  incomingCallData = null;
+
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
     showToast('无法访问麦克风');
-    endCall();
+    endCall(true);
     return;
   }
 
@@ -939,12 +982,18 @@ async function acceptIncomingCall(data) {
   socket.emit('call-answer', { to: data.from, answer });
 }
 
-function rejectIncomingCall(from) {
-  socket.emit('call-reject', { to: from });
-  endCall();
+function rejectIncomingCall() {
+  const data = incomingCallData;
+  if (!data) return;
+  incomingCallData = null;
+  socket.emit('call-reject', { to: data.from });
+  endCall(true);
 }
 
-function endCall() {
+function endCall(fromRemote) {
+  if (isEndingCall) return;
+  isEndingCall = true;
+
   if (peerConnection) {
     peerConnection.close();
     peerConnection = null;
@@ -965,14 +1014,21 @@ function endCall() {
     callTimer = null;
   }
   callSeconds = 0;
+  incomingCallData = null;
   document.getElementById('callOverlay').classList.remove('active');
 
-  if (currentChat && socket) {
+  // Only emit call-end and show toast if user initiated
+  if (!fromRemote && currentChat && socket) {
     socket.emit('call-end', { to: currentChat.username });
+    showToast('通话已结束');
+  } else if (fromRemote) {
+    showToast('对方已结束通话');
   }
+
+  setTimeout(() => { isEndingCall = false; }, 500);
 }
 
-function showCallOverlay(name, type, data) {
+function showCallOverlay(name, type) {
   const overlay = document.getElementById('callOverlay');
   overlay.classList.add('active');
 
@@ -993,10 +1049,10 @@ function showCallOverlay(name, type, data) {
     document.getElementById('callStatus').textContent = '来电...';
     document.getElementById('callTimer').style.display = 'none';
     actions.innerHTML = `
-      <button class="call-action-btn reject-call" onclick="rejectIncomingCall('${data.from}')">
+      <button class="call-action-btn reject-call" onclick="rejectIncomingCall()">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
       </button>
-      <button class="call-action-btn accept-call" onclick="acceptIncomingCall(${JSON.stringify(data).replace(/"/g, '&quot;')})">
+      <button class="call-action-btn accept-call" onclick="acceptIncomingCall()">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
       </button>
     `;
