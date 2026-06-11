@@ -15,9 +15,10 @@ app.use(express.static('public'));
 app.post('/api/register', (req, res) => {
   const { username, password, nickname } = req.body;
   if (!username || !password) return res.status(400).json({ error: '账号和密码不能为空' });
-  if (username.length < 3) return res.status(400).json({ error: '账号至少3个字符' });
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) return res.status(400).json({ error: '账号只能包含字母、数字、下划线，3-20个字符' });
   if (password.length < 6) return res.status(400).json({ error: '密码至少6个字符' });
-  const result = db.createUser(username, password, nickname);
+  const safeNickname = String(nickname || username).replace(/[<>"'&]/g, '').slice(0, 20) || username;
+  const result = db.createUser(username, password, safeNickname);
   if (result.error) return res.status(400).json(result);
   res.json(result);
 });
@@ -44,6 +45,9 @@ app.get('/api/search', (req, res) => {
 });
 
 app.put('/api/user/:username', (req, res) => {
+  if (req.body.nickname) {
+    req.body.nickname = String(req.body.nickname).replace(/[<>"'&]/g, '').slice(0, 20);
+  }
   const result = db.updateUser(req.params.username, req.body);
   if (result.error) return res.status(400).json(result);
   res.json(result);
@@ -147,12 +151,21 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send-message', (data) => {
-    const msg = db.saveMessage(data.from, data.to, data.content, data.type);
-    const toSocket = onlineUsers[data.to];
-    if (toSocket) {
-      io.to(toSocket).emit('new-message', msg);
+    if (!data.from || !data.to || !data.content) return;
+    if (String(data.content).length > 5000) {
+      socket.emit('message-error', { error: '消息太长' });
+      return;
     }
-    socket.emit('message-sent', msg);
+    try {
+      const msg = db.saveMessage(data.from, data.to, data.content, data.type);
+      const toSocket = onlineUsers[data.to];
+      if (toSocket) {
+        io.to(toSocket).emit('new-message', msg);
+      }
+      socket.emit('message-sent', msg);
+    } catch (err) {
+      console.error('send-message error:', err);
+    }
   });
 
   // Voice call signaling (1-on-1)
@@ -204,9 +217,10 @@ io.on('connection', (socket) => {
 
   // ========== Group Voice Room Signaling ==========
   socket.on('create-voice-room', (data) => {
+    const safeName = String(data.name || '\u8BED\u97F3\u623F\u95F4').replace(/[<>"'&]/g, '').slice(0, 30) || '\u8BED\u97F3\u623F\u95F4';
     const roomId = 'room_' + Date.now().toString(36);
     voiceRooms[roomId] = {
-      name: data.name || '语音房间',
+      name: safeName,
       creator: data.username,
       participants: [{ username: data.username, socketId: socket.id }]
     };
